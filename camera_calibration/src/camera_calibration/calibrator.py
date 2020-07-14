@@ -44,6 +44,7 @@ import cv2
 import cv_bridge
 import image_geometry
 import math
+import numpy
 import numpy.linalg
 import pickle
 import random
@@ -347,7 +348,7 @@ class Calibrator(object):
     """
 
     def __init__(self, boards, flags=0, fisheye_flags=0, pattern=Patterns.Chessboard, name='',
-                 checkerboard_flags=cv2.CALIB_CB_FAST_CHECK, max_chessboard_speed=-1.0):
+                 checkerboard_flags=cv2.CALIB_CB_FAST_CHECK, max_chessboard_speed=-1.0, sampling=False):
         # Ordering the dimensions for the different detectors is actually a minefield...
         if pattern == Patterns.Chessboard:
             # Make sure n_cols > n_rows to agree with OpenCV CB detector output
@@ -371,6 +372,7 @@ class Calibrator(object):
         self.pattern = pattern
         self.br = cv_bridge.CvBridge()
         self.camera_model = CAMERA_MODEL.PINHOLE
+        self.sampling = sampling
         # self.db is list of (parameters, image) samples for use in calibration. parameters has form
         # (X, Y, size, skew) all normalized to [0,1], to keep track of what sort of samples we've taken
         # and ensure enough variety.
@@ -840,6 +842,88 @@ class MonoCalibrator(Calibrator):
             raise CalibrationException("No corners found in images!")
         return goodcorners
 
+    def sampling_points(self, ipts, opts):
+
+        print(self.size)
+        ncells = 20
+        w = (self.size[0] / float(ncells))
+        h = (self.size[1] / float(ncells))
+        n = 0
+       # print("w = {0}".format(w))
+       # print("h = {0}".format(h))
+        grid = [[[] for i in range(ncells)] for j in range(ncells)]
+        for i in range(len(ipts)):
+           #     print(type(ipts[i]))
+           #     print(ipts[i])
+           #     print(ipts[i].shape)
+            for j in range(ipts[i].shape[0]):
+                n += 1
+                u = ipts[i][j, 0, 0]
+                v = ipts[i][j, 0, 1]
+                gu = int(u / w)
+                gv = int(v / h)
+            #    print("gu = {0}".format(gu))
+            #    print("gv = {0}".format(gv))
+                if gu >= 0 and gu < ncells and gv >= 0 and gv < ncells:
+                    grid[gu][gv].append((i, j))
+                else:
+                    print("ERROR gu={0}, gv={1}".format(gu, gv))
+       # print("org num of points = {0}".format(n))
+        selected = []
+
+        for i in range(ncells):
+            for j in range(ncells):
+               #         print("gird[{0}][{1}] = {2}".format(i, j, grid[i][j]))
+                if len(grid[i][i]) == 0:
+                    continue
+                if len(grid[i][j]) <= 5:
+                    for index in grid[i][j]:
+                        selected.append(index)
+                else:
+                    select = random.sample(grid[i][j], 5)
+       #             print("select = {0}".format(select))
+                    for idx in select:
+                        selected.append(idx)
+        new_ipts = numpy.zeros((len(selected), 1, 2), numpy.float32)
+        new_opts = numpy.zeros((len(selected), 1, 3), numpy.float32)
+
+        for i, idx in enumerate(selected):
+           #     print("888", i,  idx)
+            new_ipts[i, 0, 0] = ipts[idx[0]][idx[1], 0, 0]
+            new_ipts[i, 0, 1] = ipts[idx[0]][idx[1], 0, 1]
+            new_opts[i, 0, 0] = opts[idx[0]][idx[1], 0, 0]
+            new_opts[i, 0, 1] = opts[idx[0]][idx[1], 0, 1]
+            new_opts[i, 0, 2] = opts[idx[0]][idx[1], 0, 2]
+
+        ipts_list = [[] for i in range(len(ipts))]
+        opts_list = [[] for i in range(len(opts))]
+
+        for i, idx in enumerate(selected):
+            ipts_list[idx[0]].append(
+                (ipts[idx[0]][idx[1], 0, 0], ipts[idx[0]][idx[1], 0, 1]))
+            opts_list[idx[0]].append(
+                (opts[idx[0]][idx[1], 0, 0], opts[idx[0]][idx[1], 0, 1], opts[idx[0]][idx[1], 0, 2]))
+
+        out_ipts = []
+        out_opts = []
+
+        for i in range(len(ipts_list)):
+            if(len(ipts_list[i]) > 5):
+                its_arr = numpy.zeros((len(ipts_list[i]), 1, 2), numpy.float32)
+                ots_arr = numpy.zeros((len(opts_list[i]), 1, 3), numpy.float32)
+                for j in range(len(ipts_list[i])):
+                    its_arr[j, 0, 0] = ipts_list[i][j][0]
+                    its_arr[j, 0, 1] = ipts_list[i][j][1]
+
+                    ots_arr[j, 0, 0] = opts_list[i][j][0]
+                    ots_arr[j, 0, 1] = opts_list[i][j][1]
+                    ots_arr[j, 0, 2] = opts_list[i][j][2]
+
+                out_ipts.append(its_arr)
+                out_opts.append(ots_arr)
+        print("new num of points = {0}".format(len(selected)))
+        return (out_ipts, out_opts)
+
     def cal_fromcorners(self, good):
         """
         :param good: Good corner positions and boards
@@ -848,6 +932,34 @@ class MonoCalibrator(Calibrator):
 
         (ipts, ids, boards) = zip(*good)
         opts = self.mk_object_points(boards)
+        new_ipts = ipts
+        new_opts = opts
+        print("type(opts) = {0}".format(type(opts)))
+        print("type(opts[0]) = {0}".format(type(opts[0])))
+        print("shape", opts[0].shape)
+        if(self.sampling):
+            print("DO SAMPLING")
+            r = self.sampling_points(ipts, opts)
+            new_ipts = r[0]
+            new_opts = r[1]
+            print("type(new_ipts) = {0}".format(type(new_ipts)))
+            print("type(new_ipts[0]) = {0}".format(type(new_ipts[0])))
+            print("new_ipts[0].shape = {0}".format(new_ipts[0].shape))
+            print("type(new_opts) = {0}".format(type(new_opts)))
+            print("type(new_opts[0]) = {0}".format(type(new_opts[0])))
+            print("new_opts[0].shape = {0}".format(new_opts[0].shape))
+
+            num_org = 0
+            for i in range(len(ipts)):
+                num_org += ipts[i].shape[0]
+            num_new = 0
+            for i in range(len(new_ipts)):
+                num_new += new_ipts[i].shape[0]
+
+            print("original points = {0}".format(num_org))
+            print("num of planes = {0}".format(len(ipts)))
+            print("new points = {0}".format(num_new))
+            print("num of new points = {0}".format(len(new_ipts)))
         # If FIX_ASPECT_RATIO flag set, enforce focal lengths have 1/1 ratio
         intrinsics_in = numpy.eye(3, dtype=numpy.float64)
 
@@ -863,14 +975,31 @@ class MonoCalibrator(Calibrator):
         elif self.camera_model == CAMERA_MODEL.PINHOLE:
             print("mono pinhole calibration...")
             reproj_err, self.intrinsics, dist_coeffs, rvecs, tvecs = cv2.calibrateCamera(
-                opts, ipts,
+                new_opts, new_ipts,
                 self.size,
                 intrinsics_in,
                 None,
                 flags=self.calib_flags)
+
             # OpenCV returns more than 8 coefficients (the additional ones all zeros) when CALIB_RATIONAL_MODEL is set.
             # The extra ones include e.g. thin prism coefficients, which we are not interested in.
             self.distortion = dist_coeffs.flat[:8].reshape(-1, 1)
+            if self.sampling:
+                rvecs = []
+                tvecs = []
+                for i in range(len(ipts)):
+                    (ret, rvec, tvec) = cv2.solvePnP(
+                        opts[i], ipts[i], self.intrinsics, self.distortion)
+                    print("cv2.solvePnP[{0}], {1}, {2}")
+                    print("ret = {0}".format(ret))
+                    print("rvec = {0}".format(rvec))
+                    print("tvec = {0}".format(tvec))
+                    print("type(tvec) = {0}".format(type(tvec)))
+                    rvecs.append(rvec)
+                    tvecs.append(tvec)
+                print("type(opts) = {0}".format(type(opts)))
+                print("type(opts[0]) = {0}".format(type(opts[0])))
+                print("opts[0].shape = {0}".format(opts[0].shape))
         elif self.camera_model == CAMERA_MODEL.FISHEYE:
             print("mono fisheye calibration...")
             # WARNING: cv2.fisheye.calibrate wants float64 points
